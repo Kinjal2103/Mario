@@ -1,4 +1,5 @@
-/*
+
+	/*
  * ============================================================
  *  MARIO-STYLE GAME FOR DE1-SoC (ARM Cortex-A9)
  *  VGA Pixel Buffer 320x240, 16-bit colour
@@ -248,20 +249,48 @@ static void erase(i32 sx, i32 sy, i32 w, i32 h) {
 }
 
 /* ============================================================
- *  STATIC BACKGROUND (called once per level + on camera scroll)
+ *  BACKGROUND
+ *
+ *  draw_bg_full  — uses cls(), only called at level start/restart
+ *                  (one-time cost, not per frame)
+ *
+ *  draw_bg_scroll — NO cls(). Repaints sky/ground/platforms
+ *                   directly. The sky rect covers the full screen
+ *                   width so nothing from the previous frame leaks
+ *                   through. This is the key fix: same visual result
+ *                   as cls()+drawing, but saves the entire extra
+ *                   full-screen fill pass on every scroll frame.
  * ============================================================ */
-static void draw_bg(void) {
+static void draw_bg_full(void) {
     cls(SKY);
     rect(0, GROUND_Y,   SW, 4,           GRASS);
     rect(0, GROUND_Y+4, SW, SH-GROUND_Y, DIRT);
     for (int i=0; i<N_PLAT; i++) {
         i32 sx=plats[i].x-cam_x;
         if (sx+plats[i].w<0||sx>SW) continue;
-        rect(sx, plats[i].y,   plats[i].w, 3,      GRASS);
+        rect(sx, plats[i].y,   plats[i].w, 3,       GRASS);
         rect(sx, plats[i].y+3, plats[i].w, PLATH-3, PLAT_C);
     }
     for (int i=0; i<N_COIN; i++) {
         if (coins[i].got) continue;
+        i32 sx=coins[i].x-cam_x;
+        if (sx>-CR&&sx<SW+CR) circle(sx,coins[i].y,CR,GOLD);
+    }
+}
+
+static void draw_bg_scroll(void) {
+    /* Sky covers the whole frame — no cls() needed */
+    rect(0, 0,          SW, GROUND_Y,       SKY);
+    rect(0, GROUND_Y,   SW, 4,              GRASS);
+    rect(0, GROUND_Y+4, SW, SH-GROUND_Y-4, DIRT);
+    for (int i=0; i<N_PLAT; i++) {
+        i32 sx=plats[i].x-cam_x;
+        if (sx+plats[i].w<0||sx>SW) continue;
+        rect(sx, plats[i].y,   plats[i].w, 3,       GRASS);
+        rect(sx, plats[i].y+3, plats[i].w, PLATH-3, PLAT_C);
+    }
+    for (int i=0; i<N_COIN; i++) {
+        if (coins[i].got || coins[i].x==-9999) continue;
         i32 sx=coins[i].x-cam_x;
         if (sx>-CR&&sx<SW+CR) circle(sx,coins[i].y,CR,GOLD);
     }
@@ -372,7 +401,7 @@ static void update(void) {
     pl.x+=pl.vx; pl.y+=pl.vy;
     if(pl.x<0) pl.x=0;
 
-    /* Camera */
+    /* Camera — unchanged from original */
     int tc=pl.x-80; if(tc<0)tc=0; if(tc>800-SW)tc=800-SW;
     cam_x=tc;
 
@@ -422,9 +451,20 @@ static int prev_cam=-1;
 static bool need_full_bg=true;
 
 static void render(void) {
-    /* Full background redraw when camera scrolls */
     if(cam_x!=prev_cam||need_full_bg){
-        draw_bg();
+        /*
+         * THE FIX: on scroll frames use draw_bg_scroll() which has
+         * no cls() call. The sky rect is full-screen-width so it
+         * overwrites everything cleanly. This eliminates the double
+         * write (cls fill then draw) that caused the lag spike.
+         */
+        if(need_full_bg){
+            draw_bg_full();
+            need_full_bg=false;
+        } else {
+            draw_bg_scroll();
+        }
+
         /* Re-stamp all visible enemies after bg redraw */
         for(int i=0;i<N_ENEMY;i++){
             if(!ens[i].alive) continue;
@@ -437,7 +477,6 @@ static void render(void) {
             if(sx>-PW&&sx<SW) draw_player(sx,pl.y,pl.right,false);
         }
         prev_cam=cam_x;
-        need_full_bg=false;
         /* Update stored screen positions */
         pl_px=pl.x; pl_py=pl.y;
         for(int i=0;i<N_ENEMY;i++){en_px[i]=ens[i].x;en_py[i]=ens[i].y;}
@@ -492,17 +531,18 @@ static void render(void) {
     /* HUD */
     draw_hud();
 
-    /* Overlays */
     if(state==DEAD){
-        rect(80,95,160,46,BLACK); rect(82,97,156,42,DKRED);
-        dstr(92,106,"GAME OVER",WHITE);
-        dstr(86,120,"KEY3 RESTART",WHITE);
-    }
-    if(state==WIN){
-        rect(80,95,160,46,BLACK); rect(82,97,156,42,DKGRN);
-        dstr(100,106,"YOU WIN",WHITE);
-        dstr(86,120,"KEY3 RESTART",WHITE);
-    }
+		rect(80,88,160,58,BLACK); rect(82,90,156,54,DKRED);
+		dstr(92,98,"GAME OVER",WHITE);
+		dstr(86,110,"SCORE:",WHITE); dint(128,110,score,WHITE);
+		dstr(86,122,"KEY3 RESTART",WHITE);
+	}
+	if(state==WIN){
+		rect(80,88,160,58,BLACK); rect(82,90,156,54,DKGRN);
+		dstr(100,98,"YOU WIN",WHITE);
+		dstr(86,110,"SCORE:",WHITE); dint(128,110,score,WHITE);
+		dstr(86,122,"KEY3 RESTART",WHITE);
+	}
 }
 
 /* ============================================================
@@ -517,15 +557,17 @@ int main(void) {
     init_level();
 
     /* Paint background into both buffers before starting */
-    draw_bg(); draw_hud();
+    draw_bg_full(); draw_hud();
     swap_buf();
-    draw_bg(); draw_hud();
+    draw_bg_full(); draw_hud();
     /* Stamp initial sprites */
     draw_player(pl.x-cam_x, pl.y, pl.right, false);
     for(int i=0;i<N_ENEMY;i++){
         i32 sx=ens[i].x-cam_x;
         if(sx>-EW&&sx<SW) draw_enemy(sx,ens[i].y);
     }
+    need_full_bg=false;
+    prev_cam=cam_x;
 
     while(1){
         u32 edge=kedge();
@@ -533,19 +575,21 @@ int main(void) {
             /* Full restart */
             init_level();
             need_full_bg=true; prev_cam=-1;
-            draw_bg(); draw_hud();
+            draw_bg_full(); draw_hud();
             draw_player(pl.x-cam_x,pl.y,pl.right,false);
             for(int i=0;i<N_ENEMY;i++){
                 i32 sx=ens[i].x-cam_x;
                 if(sx>-EW&&sx<SW) draw_enemy(sx,ens[i].y);
             }
             swap_buf();
-            draw_bg(); draw_hud();
+            draw_bg_full(); draw_hud();
             draw_player(pl.x-cam_x,pl.y,pl.right,false);
             for(int i=0;i<N_ENEMY;i++){
                 i32 sx=ens[i].x-cam_x;
                 if(sx>-EW&&sx<SW) draw_enemy(sx,ens[i].y);
             }
+            need_full_bg=false;
+            prev_cam=cam_x;
         }
 
         update();
